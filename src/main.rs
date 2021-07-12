@@ -1,20 +1,169 @@
 #![deny(clippy::all)]
 #![forbid(unsafe_code)]
 
-use log::{error};
-use pixels::{Error, Pixels, SurfaceTexture};
+mod complex_plane;
+use crate::complex_plane::ComplexPlane;
+
+
+
 use winit::dpi::{LogicalPosition, LogicalSize, PhysicalSize};
-use winit::event::{Event, VirtualKeyCode};
-use winit::event_loop::{ControlFlow, EventLoop};
-use winit_input_helper::WinitInputHelper;
+
+use winit::event::VirtualKeyCode;
+use winit::event_loop::{EventLoop};
+
 use num_complex::Complex;
 use rayon::prelude::*;
 use hsl::HSL;
 
-const SCREEN_WIDTH: u32 = 960;
-const SCREEN_HEIGHT: u32 = 540;
+use glium::{Surface, implement_vertex, uniform};
+use glium::backend::{Backend, Facade};
+
+#[allow(unused_imports)]
+use glium::glutin;
+
+const SCREEN_WIDTH: u32 = 1280;
+const SCREEN_HEIGHT: u32 = 800;
+
+#[derive(Copy, Clone)]
+struct Vertex {
+    position: [f32; 2],
+}
+
+implement_vertex!(Vertex, position);
+
+struct Context {
+    display: glium::Display,
+    program: glium::Program,
+    vertex_buffer: glium::VertexBuffer<Vertex>,
+}
+
+impl Context {
+    fn new(display: glium::Display, program: glium::Program, vertex_buffer: glium::VertexBuffer<Vertex>) -> Self {
+        return Context {
+            display,
+            program,
+            vertex_buffer
+        }
+    }
+    fn redraw(&self, max_iterations: i32, complex_plane: ComplexPlane, pixel_size: f32) {
+        let uniforms = uniform! {
+            max_iterations: max_iterations,
+            complex_plane: complex_plane,
+            pixel_size: pixel_size,
+        };
+    
+        let mut target = self.display.draw();
+        target.draw(
+            &self.vertex_buffer,
+            &glium::index::NoIndices(glium::index::PrimitiveType::TrianglesList),
+            &self.program,
+            &uniforms,
+            &Default::default()
+        ).unwrap();
+    
+        target.finish().unwrap();
+    }
+}
+
+fn main() {
+    let event_loop = glutin::event_loop::EventLoop::new();
+    let wb = glutin::window::WindowBuilder::new()
+        .with_inner_size(LogicalSize::new(SCREEN_WIDTH, SCREEN_HEIGHT));
+    let cb = glutin::ContextBuilder::new().with_vsync(true);
+    let display = glium::Display::new(wb, cb, &event_loop).unwrap();
+
+    // Compile the shaders
+    let program = glium::Program::from_source(
+        &display,
+        include_str!("shader.glslv"),
+        include_str!("shader.glslf"),
+        None).unwrap();
+    
+    // Render 2 triangles covering the whole screen
+    let vertices = [
+        Vertex { position: [-1.0, 1.0] },
+        Vertex { position: [1.0, 1.0] },
+        Vertex { position: [-1.0, -1.0] },
+        
+        Vertex { position: [-1.0, -1.0] },
+        Vertex { position: [1.0, 1.0] },
+        Vertex { position: [1.0, -1.0] },
+    ];
+    
+    let vertex_buffer = glium::VertexBuffer::new(&display, &vertices).unwrap();
+
+    let context = Context::new(display, program, vertex_buffer);
+
+    let max_iterations: i32 = 1000;
+    let mut complex_plane = ComplexPlane::default();
+    
+    // Render loop
+    let dim = context.display.get_context().get_framebuffer_dimensions();
+    let (mut fitted_plane, mut pixel_size) = complex_plane.fit_to_screen(dim.0, dim.1);
+    
+    let mut redraw_needed = false;
+
+    event_loop.run(move |event, _, control_flow| {
+        match event {
+            glutin::event::Event::WindowEvent { event, .. } => match event {
+                glutin::event::WindowEvent::CloseRequested => {
+                    *control_flow = glutin::event_loop::ControlFlow::Exit;
+                    return;
+                },
+                glutin::event::WindowEvent::KeyboardInput {
+                    device_id, input: kin, is_synthetic 
+                } => {  
+                    if kin.state == glutin::event::ElementState::Pressed {
+                        if kin.virtual_keycode == Some(winit::event::VirtualKeyCode::W) {
+                            complex_plane = complex_plane.move_down(-10.0); redraw_needed = true;
+                        }
+                        else if kin.virtual_keycode == Some(winit::event::VirtualKeyCode::S) {
+                            complex_plane = complex_plane.move_down(10.0); redraw_needed = true;
+                        }
+                        else if kin.virtual_keycode == Some(winit::event::VirtualKeyCode::A) {
+                            complex_plane = complex_plane.move_left(10.0); redraw_needed = true;
+                        }
+                        else if kin.virtual_keycode == Some(winit::event::VirtualKeyCode::D) {
+                            complex_plane = complex_plane.move_left(-10.0); redraw_needed = true;
+                        }
+                        else if kin.virtual_keycode == Some(winit::event::VirtualKeyCode::R) {
+                            complex_plane = complex_plane.zoom(0.5); redraw_needed = true;
+                        }
+                        else if kin.virtual_keycode == Some(winit::event::VirtualKeyCode::F) {
+                            complex_plane = complex_plane.zoom(2.0); redraw_needed = true;
+                        }
+                    }
+
+                    if (redraw_needed) {
+                        redraw_needed = false;
+                        let a = complex_plane.fit_to_screen(dim.0, dim.1);
+                        fitted_plane = a.0;
+                        pixel_size = a.1;
+                        context.redraw(max_iterations, fitted_plane, pixel_size);
+                    }
+                },
+                _ => return,
+            },
+            glutin::event::Event::NewEvents(cause) => match cause {
+                glutin::event::StartCause::ResumeTimeReached { .. } => (),
+                glutin::event::StartCause::Init => (),
+                _ => return,
+            },
+            glutin::event::Event::RedrawRequested(_) => {
+                context.redraw(max_iterations, fitted_plane, pixel_size);
+            }
+            _ => return,
+        }
+
+        let next_frame_time = std::time::Instant::now() +
+            std::time::Duration::from_nanos(16_666_667);
+        *control_flow = glutin::event_loop::ControlFlow::WaitUntil(next_frame_time);
+    });
+}
 
 
+
+/*
 fn main() -> Result<(), Error> {
     env_logger::init();
     let event_loop = EventLoop::new();
@@ -82,6 +231,7 @@ fn main() -> Result<(), Error> {
         }
     });
 }
+*/
 
 #[derive(Clone, PartialEq)]
 enum CellState {
